@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io
 import os
 import warnings
 from statsmodels.tsa.statespace.sarimax import SARIMAX
@@ -9,14 +10,14 @@ from datetime import datetime, timedelta
 
 warnings.filterwarnings("ignore")
 
-st.set_page_config(page_title="Forecast SARIMAX - Leitura Local (PX)", layout="wide")
+st.set_page_config(page_title="Forecast SARIMAX — PX (dados locais/repo + upload fallback)", layout="wide")
 
 # =============================================================================
-# CONFIG: caminhos FIXOS (Windows - OneDrive) + parâmetros do modelo
+# CONFIG — caminhos RELATIVOS ao repositório (pasta data/)
 # =============================================================================
 CONFIG = {
-    'ARQUIVO_TOTAL': r'C:\Users\GustavoAlvesdeSouza\OneDrive - PX Center\Área de Trabalho\10_Forecast\50_Projeções\dados_para_teste.csv',
-    'ARQUIVO_SEGMENTOS': r'C:\Users\GustavoAlvesdeSouza\OneDrive - PX Center\Área de Trabalho\10_Forecast\50_Projeções\Entrega diária por cavaleiro.csv',
+    'ARQUIVO_TOTAL': './data/dados_para_teste.csv',
+    'ARQUIVO_SEGMENTOS': './data/Entrega diária por cavaleiro.csv',
     'CONFIDENCE_INTERVAL': 0.80,
     'USAR_LOG': True,
     'APLICAR_TRAVA_MAXIMA': True,
@@ -24,7 +25,7 @@ CONFIG = {
 }
 
 # =============================================================================
-# Utilitários
+# Funções utilitárias
 # =============================================================================
 def normalizar_colunas(df: pd.DataFrame):
     df.columns = [c.strip().upper() for c in df.columns]
@@ -113,9 +114,9 @@ def treinar_e_prever(series_treino, exog_treino, exog_futuro,
     return fc_mean
 
 def carregar_csv_local(caminho: str):
-    """Lê um CSV local tentando ; e , com UTF-8 ou Latin1."""
+    """Lê um CSV local/relativo tentando ; e , com UTF-8 ou Latin1."""
     if not os.path.exists(caminho):
-        raise FileNotFoundError(f"Arquivo não encontrado: {caminho}")
+        raise FileNotFoundError(f"Arquivo não encontrado: {os.path.abspath(caminho)}")
     erros = []
     for sep in [';', ',']:
         for enc in ['utf-8', 'latin1']:
@@ -126,8 +127,19 @@ def carregar_csv_local(caminho: str):
                 erros.append(f"{os.path.basename(caminho)} (sep={sep}, enc={enc}): {e}")
     raise ValueError("Falha ao ler o CSV.\n" + "\n".join(erros))
 
+def carregar_csv_robusto_bytes(conteudo: bytes):
+    """Leitura para uploads (fallback na nuvem)."""
+    for sep in [';', ',']:
+        for enc in ['utf-8', 'latin1']:
+            try:
+                df = pd.read_csv(io.BytesIO(conteudo), sep=sep, encoding=enc)
+                return df, sep, enc
+            except Exception:
+                pass
+    raise ValueError("Não consegui ler o CSV (separador/codificação).")
+
 # =============================================================================
-# Sidebar — somente DATAS e PARÂMETROS (caminhos são FIXOS)
+# Sidebar — datas e parâmetros
 # =============================================================================
 with st.sidebar:
     st.header("⚙️ Configurações")
@@ -138,9 +150,9 @@ with st.sidebar:
         st.warning("A data fim da previsão deve ser maior que a data de corte.")
 
     st.divider()
-    st.markdown("**Arquivos (fixos):**")
-    st.code(CONFIG['ARQUIVO_TOTAL'])
-    st.code(CONFIG['ARQUIVO_SEGMENTOS'])
+    st.markdown("**Arquivos padrão (relativos ao repositório):**")
+    st.code(os.path.abspath(CONFIG['ARQUIVO_TOTAL']))
+    st.code(os.path.abspath(CONFIG['ARQUIVO_SEGMENTOS']))
 
     st.divider()
     usar_log = st.toggle("Usar log1p", value=CONFIG['USAR_LOG'])
@@ -151,26 +163,36 @@ with st.sidebar:
     btn_rodar = st.button("▶️ Rodar previsão", type="primary", use_container_width=True)
 
 st.title("🔮 Forecast Diário com SARIMAX — Leitura Local (PX)")
-st.caption("Lendo diretamente de arquivos locais fixos no OneDrive • Exógenas básicas automáticas • Exporta CSV final.")
+st.caption("Lendo ./data/* do repositório. Se não existir, o app solicita upload e segue normalmente.")
 
 # =============================================================================
 # Execução
 # =============================================================================
 if btn_rodar:
+    # 1) Tenta ler pelos caminhos relativos (repo/local)
     try:
         df_total_raw, sep_t, enc_t = carregar_csv_local(CONFIG['ARQUIVO_TOTAL'])
-        df_seg_raw, sep_s, enc_s = carregar_csv_local(CONFIG['ARQUIVO_SEGMENTOS'])
-    except Exception as e:
-        st.error(f"Erro ao ler arquivos locais: {e}")
-        st.stop()
+        df_seg_raw,   sep_s, enc_s = carregar_csv_local(CONFIG['ARQUIVO_SEGMENTOS'])
+        origem_dados = "repositório (./data)"
+    except FileNotFoundError:
+        # 2) Fallback de upload — útil na nuvem se você não versionou os CSVs
+        st.warning("Arquivos padrão não encontrados em ./data/. Envie os CSVs abaixo para continuar.")
+        up_total = st.file_uploader("Total (dados_para_teste.csv)", type=["csv"])
+        up_seg   = st.file_uploader("Segmentos (Entrega diária por cavaleiro.csv)", type=["csv"])
+        if not up_total or not up_seg:
+            st.stop()
+        df_total_raw, sep_t, enc_t = carregar_csv_robusto_bytes(up_total.getvalue())
+        df_seg_raw,   sep_s, enc_s = carregar_csv_robusto_bytes(up_seg.getvalue())
+        origem_dados = "upload"
 
+    # Normalização e detecções
     df_total_raw = normalizar_colunas(df_total_raw)
     df_seg_raw = normalizar_colunas(df_seg_raw)
 
     col_data_total = detectar_coluna_data(df_total_raw)
     col_data_seg = detectar_coluna_data(df_seg_raw)
     if not col_data_total or not col_data_seg:
-        st.error("Não achei coluna de data (com 'DIA' ou 'DATA') em um dos arquivos.")
+        st.error("Não achei coluna de data (contendo 'DIA' ou 'DATA') em um dos arquivos.")
         st.stop()
 
     col_valor_total = detectar_coluna_valor_total(df_total_raw)
@@ -178,17 +200,16 @@ if btn_rodar:
         st.error("Não achei coluna de valor no arquivo TOTAL (ex.: VENDA, VENDIDOS, VALOR, QTDE, QTD).")
         st.stop()
 
-    # Limpeza numérica do total
+    # Limpeza numérica
     df_total_raw[col_valor_total] = limpar_numerico_robusto(df_total_raw[col_valor_total])
 
     # Features e index
     df_total = aplicar_features_basicas(df_total_raw, col_data_total)
     df_seg = aplicar_features_basicas(df_seg_raw, col_data_seg)
 
-    # Datas
+    # Datas e horizonte futuro
     data_corte_treino = pd.to_datetime(data_corte)
     data_fim_previsao = pd.to_datetime(data_fim_prev)
-
     datas_futuras = pd.date_range(start=data_corte_treino + pd.Timedelta(days=1),
                                   end=data_fim_previsao, freq='D')
     if len(datas_futuras) == 0:
@@ -205,11 +226,12 @@ if btn_rodar:
         st.stop()
 
     st.subheader("📊 Parâmetros de execução")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Confiança (exibição)", f"{int(conf*100)}%")
-    c2.metric("Log1p", "Sim" if usar_log else "Não")
-    c3.metric("Trava", f"{'On' if aplicar_trava else 'Off'} @ p{trava_percentil:.3f}")
-    c4.metric("Dias a prever", len(datas_futuras))
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Origem dos dados", origem_dados)
+    c2.metric("Confiança (exibição)", f"{int(conf*100)}%")
+    c3.metric("Log1p", "Sim" if usar_log else "Não")
+    c4.metric("Trava", f"{'On' if aplicar_trava else 'Off'} @ p{trava_percentil:.3f}")
+    c5.metric("Dias a prever", len(datas_futuras))
 
     with st.spinner("Treinando TOTAL..."):
         exog_train_tot = train_tot[cols_exog] if set(cols_exog).issubset(train_tot.columns) else preparar_exogenas_index(train_tot.index)
@@ -270,21 +292,21 @@ if btn_rodar:
         with st.expander("Ver séries por segmento"):
             st.dataframe(df_final.drop(columns=['SOMA_SEGMENTOS']))
 
-    # Download do CSV com o mesmo padrão do seu script
+    # Download CSV
     nome_arquivo = f"Forecast_de_{data_corte_treino.strftime('%d-%m')}_ate_{data_fim_previsao.strftime('%d-%m-%Y')}.csv"
     csv_bytes = df_final.to_csv(sep=';', decimal=',', encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button("💾 Baixar CSV", data=csv_bytes, file_name=nome_arquivo, mime="text/csv")
 
     # Debug
     with st.expander("Detalhes técnicos / Debug"):
-        st.write("TOTAL:", os.path.abspath(CONFIG['ARQUIVO_TOTAL']), " | sep/enc:", sep_t, enc_t)
-        st.write("SEGMENTOS:", os.path.abspath(CONFIG['ARQUIVO_SEGMENTOS']), " | sep/enc:", sep_s, enc_s)
+        st.write("TOTAL (esperado):", os.path.abspath(CONFIG['ARQUIVO_TOTAL']), " | sep/enc:", sep_t, enc_t)
+        st.write("SEGMENTOS (esperado):", os.path.abspath(CONFIG['ARQUIVO_SEGMENTOS']), " | sep/enc:", sep_s, enc_s)
         st.write("Coluna de data (TOTAL):", col_data_total)
         st.write("Coluna de valor (TOTAL):", col_valor_total)
         st.write("Coluna de data (SEGMENTOS):", col_data_seg)
         st.write("Segmentos detectados:", cols_seg)
-        st.write("Intervalo futuro:", f"{datas_futuras[0].date()} → {datas_futuras[-1].date()}")
+        st.write("Intervalo futuro:", f"{df_final.index[0].date()} → {df_final.index[-1].date()}")
         st.dataframe(df_final.head(10))
 
 else:
-    st.info("Ajuste as datas na sidebar e clique **Rodar previsão**. Os arquivos já estão fixos via CONFIG.")
+    st.info("Use ./data/ no repositório para os CSVs (ou faça upload quando solicitado) e clique **Rodar previsão**.")

@@ -1,6 +1,9 @@
+# Versões compatíveis para evitar o erro altair.vegalite.v4
+streamlit>=1.53
+altair>=5,<6
+
 pandas
 numpy
 statsmodels
 scikit-learn
 python-dateutil
-streamlit
